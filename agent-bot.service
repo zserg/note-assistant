@@ -1,0 +1,19 @@
+[Unit]
+Description=AI Agent Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=zserg
+Group=zserg
+WorkingDirectory=/home/zserg/projects3/agent-simple
+Environment="PATH=/home/zserg/projects3/agent-simple/venv/bin"
+ExecStart=/home/zserg/projects3/agent-simple/venv/bin/python /home/zserg/projects3/agent-simple/telegram_bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agent-bot
+
+[Install]
+WantedBy=multi-user.target
