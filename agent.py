@@ -1,16 +1,61 @@
 """
 AI Agent на базе LangChain.
 
-Пример агента с инструментами (tools) для выполнения различных задач.
+Агент для управления заметками в Markdown формате.
 """
 
 import os
+import sys
+import logging
 from typing import Type
 from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
-from langchain.agents import AgentExecutor, create_openai_functions_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+
+# === Настройка логирования ===
+# Создаём логгер
+logger = logging.getLogger("agent")
+logger.setLevel(logging.DEBUG)
+
+# Формат логов
+log_formatter = logging.Formatter(
+    "%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+# Хендлер для консоли
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(log_formatter)
+
+# Хендлер для файла
+file_handler = logging.FileHandler("agent.log", encoding="utf-8")
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(log_formatter)
+
+# Добавляем хендлеры к логгеру
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+
+
+# === Настройка кодировки для Windows ===
+def clean_text(text):
+    """Очистка текста от surrogate characters."""
+    if text is None:
+        return ""
+    # Удаляем surrogate pairs
+    return text.encode('utf-8', 'ignore').decode('utf-8')
+
+
+# Настраиваем stdout/stdin для корректной работы с UTF-8
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
+from langchain.agents import create_agent as create_langchain_agent
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI  # DeepSeek API совместим с OpenAI API
 from pydantic import BaseModel, Field
@@ -22,74 +67,155 @@ load_dotenv()
 
 # === Определение инструментов (Tools) ===
 
-class CurrentTimeInput(BaseModel):
-    """Входные параметры для получения текущего времени."""
-    timezone: str = Field(default="UTC", description="Часовой пояс (по умолчанию UTC)")
+class SaveNoteInput(BaseModel):
+    """Входные параметры для сохранения заметки."""
+    content: str = Field(description="Текст заметки для сохранения в формате Markdown")
 
 
-class CurrentTimeTool(BaseTool):
-    """Инструмент для получения текущего времени."""
+class SaveNoteTool(BaseTool):
+    """Инструмент для сохранения заметок в Markdown файлы."""
     
-    name: str = "current_time"
-    description: str = "Возвращает текущее время и дату"
-    args_schema: Type[BaseModel] = CurrentTimeInput
+    name: str = "save_note"
+    description: str = "Сохраняет текст как Markdown файл в директорию notes. Имя файла - дата и время создания."
+    args_schema: Type[BaseModel] = SaveNoteInput
     
-    def _run(self, timezone: str = "UTC") -> str:
-        """Получить текущее время."""
-        now = datetime.now()
-        return f"Текущее время ({timezone}): {now.strftime('%Y-%m-%d %H:%M:%S')}"
-
-
-class CalculatorInput(BaseModel):
-    """Входные параметры для калькулятора."""
-    expression: str = Field(description="Математическое выражение для вычисления (например: 2 + 2 * 3)")
-
-
-class CalculatorTool(BaseTool):
-    """Инструмент-калькулятор для математических вычислений."""
-    
-    name: str = "calculator"
-    description: str = "Выполняет математические вычисления. Используйте для расчетов."
-    args_schema: Type[BaseModel] = CalculatorInput
-    
-    def _run(self, expression: str) -> str:
-        """Вычислить математическое выражение."""
+    def _run(self, content: str) -> str:
+        """Сохранить заметку в Markdown файл."""
+        logger.info(f"🔧 TOOL CALL: save_note | filename: auto-generated")
+        logger.debug(f"save_note | content preview: {content[:100]}...")
+        
+        # Очищаем текст от surrogate characters
+        content = clean_text(content)
+        
+        # Создаем директорию notes если её нет
+        notes_dir = Path("notes")
+        notes_dir.mkdir(exist_ok=True)
+        
+        # Формируем имя файла: YYYY-MM-DD_HH-MM-SS.md
+        filename = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".md"
+        filepath = notes_dir / filename
+        
+        # Записываем содержимое в файл
         try:
-            # Безопасное вычисление с ограниченным набором функций
-            allowed_names = {
-                "abs": abs,
-                "round": round,
-                "max": max,
-                "min": min,
-                "pow": pow,
-            }
-            result = eval(expression, {"__builtins__": {}}, allowed_names)
-            return f"Результат: {result}"
+            filepath.write_text(content, encoding="utf-8")
+            result = f"✅ Заметка сохранена: {filepath}"
+            logger.info(f"🔧 TOOL RESULT: save_note | {result}")
+            return result
         except Exception as e:
-            return f"Ошибка вычисления: {str(e)}"
+            result = f"❌ Ошибка сохранения: {str(e)}"
+            logger.error(f"🔧 TOOL RESULT: save_note | {result}")
+            return result
 
 
-class SearchInput(BaseModel):
-    """Входные параметры для поиска."""
-    query: str = Field(description="Поисковый запрос")
+class SearchNotesInput(BaseModel):
+    """Входные параметры для поиска в заметках."""
+    query: str = Field(description="Текст для поиска в файлах заметок")
 
 
-class MockSearchTool(BaseTool):
-    """Заглушка для поиска (в реальном проекте замените на реальный API)."""
+class SearchNotesTool(BaseTool):
+    """Инструмент для поиска текста в файлах директории notes."""
     
-    name: str = "search"
-    description: str = "Ищет информацию в интернете. Используйте для поиска актуальной информации."
-    args_schema: Type[BaseModel] = SearchInput
+    name: str = "search_notes"
+    description: str = "Ищет текст в файлах директории notes. Возвращает найденные совпадения с именами файлов."
+    args_schema: Type[BaseModel] = SearchNotesInput
     
     def _run(self, query: str) -> str:
-        """Выполнить поиск (заглушка)."""
-        # В реальном проекте здесь будет вызов поискового API
-        return (
-            f"[ЗАГЛУШКА ПОИСКА] Результаты поиска для '{query}':\n"
-            "1. Это пример результата поиска\n"
-            "2. В реальном проекте подключите Google Search API, Bing API или другой сервис\n"
-            "3. Для тестирования агента используются имитационные данные"
-        )
+        """Поиск текста в файлах notes."""
+        logger.info(f"🔧 TOOL CALL: search_notes | query: '{query}'")
+        
+        # Очищаем запрос от surrogate characters
+        query = clean_text(query)
+        notes_dir = Path("notes")
+        
+        if not notes_dir.exists():
+            return "❌ Директория notes не существует. Сначала сохраните заметку."
+        
+        query_lower = query.lower()
+        results = []
+        
+        try:
+            for md_file in notes_dir.glob("*.md"):
+                try:
+                    content = clean_text(md_file.read_text(encoding="utf-8"))
+                    if query_lower in content.lower():
+                        # Находим контекст вокруг совпадения
+                        lines = content.split("\n")
+                        matching_lines = []
+                        for i, line in enumerate(lines, 1):
+                            if query_lower in line.lower():
+                                matching_lines.append(f"  Строка {i}: {line.strip()}")
+                        
+                        if matching_lines:
+                            results.append(f"📄 {md_file.name}:\n" + "\n".join(matching_lines))
+                except Exception as e:
+                    results.append(f"⚠️ {md_file.name}: ошибка чтения ({str(e)})")
+            
+            if not results:
+                result_msg = f"🔍 По запросу '{query}' ничего не найдено."
+                logger.info(f"🔧 TOOL RESULT: search_notes | {result_msg}")
+                return result_msg
+            
+            result_msg = f"🔍 Результаты поиска по '{query}':\n\n" + "\n\n".join(results)
+            logger.info(f"🔧 TOOL RESULT: search_notes | found {len(results)} file(s)")
+            logger.debug(f"search_notes | full result: {result_msg[:200]}...")
+            return result_msg
+            
+        except Exception as e:
+            result = f"❌ Ошибка поиска: {str(e)}"
+            logger.error(f"🔧 TOOL RESULT: search_notes | {result}")
+            return result
+
+
+class GetNoteInput(BaseModel):
+    """Входные параметры для получения содержимого заметки."""
+    filename: str = Field(description="Имя файла заметки (например: 2026-02-13_21-54-01.md)")
+
+
+class GetNoteTool(BaseTool):
+    """Инструмент для получения содержимого заметки по имени файла."""
+    
+    name: str = "get_note"
+    description: str = "Возвращает полное содержимое заметки по имени файла. Файл должен быть в директории notes."
+    args_schema: Type[BaseModel] = GetNoteInput
+    
+    def _run(self, filename: str) -> str:
+        """Получить содержимое заметки по имени файла."""
+        logger.info(f"🔧 TOOL CALL: get_note | filename: '{filename}'")
+        
+        # Очищаем имя файла
+        filename = clean_text(filename).strip()
+        
+        notes_dir = Path("notes")
+        filepath = notes_dir / filename
+        
+        # Проверяем безопасность пути (чтобы не выйти за пределы notes)
+        try:
+            filepath.resolve().relative_to(notes_dir.resolve())
+        except ValueError:
+            result = "❌ Некорректное имя файла."
+            logger.error(f"🔧 TOOL RESULT: get_note | {result}")
+            return result
+        
+        if not filepath.exists():
+            result = f"❌ Файл '{filename}' не найден в директории notes."
+            logger.warning(f"🔧 TOOL RESULT: get_note | {result}")
+            return result
+        
+        if not filepath.is_file():
+            result = f"❌ '{filename}' не является файлом."
+            logger.warning(f"🔧 TOOL RESULT: get_note | {result}")
+            return result
+        
+        try:
+            content = clean_text(filepath.read_text(encoding="utf-8"))
+            result = f"📄 **{filename}**\n\n{content}"
+            logger.info(f"🔧 TOOL RESULT: get_note | success, content length: {len(content)} chars")
+            logger.debug(f"get_note | full content: {content[:200]}...")
+            return result
+        except Exception as e:
+            result = f"❌ Ошибка чтения файла: {str(e)}"
+            logger.error(f"🔧 TOOL RESULT: get_note | {result}")
+            return result
 
 
 # === Создание агента ===
@@ -117,39 +243,99 @@ def create_agent():
     
     # Список инструментов
     tools = [
-        CurrentTimeTool(),
-        CalculatorTool(),
-        MockSearchTool(),
+        SaveNoteTool(),
+        SearchNotesTool(),
+        GetNoteTool(),
     ]
     
-    # Создание промпта
-    system_prompt = """Ты — полезный AI ассистент. У тебя есть доступ к следующим инструментам:
+    # Создание агента с использованием LangGraph
+    system_prompt = """Ты — интеллектуальный ассистент, который общается с пользователем и ведёт личную память (заметки).
 
-1. current_time - получить текущее время
-2. calculator - калькулятор для математических вычислений  
-3. search - поиск информации в интернете
+Твоя задача — обрабатывать каждое входное сообщение пользователя и определить, является ли оно заметкой для сохранения или обычным сообщением для ответа.
 
-Используй инструменты, когда это необходимо для ответа на вопрос пользователя.
-Если вопрос можно ответить без инструментов — отвечай напрямую.
-Всегда отвечай на языке пользователя (русский или английский).
+🔹 Основные правила
+
+Всегда анализируй вход пользователя.
+
+Если сообщение является заметкой, то:
+- НЕ веди полноценный диалог по её содержанию,
+- СОХРАНИ её в память,
+- добавь подходящие тэги,
+- сохрани в формате Markdown,
+- подтверди сохранение короткой фразой.
+
+Если сообщение НЕ является заметкой:
+- отвечай пользователю обычным образом,
+- не сохраняй сообщение в память.
+
+🔹 Как определять, что сообщение — заметка
+
+Считай сообщение заметкой, если оно:
+- начинается со слов типа: "запомни", "заметка", "важно", "напомни", "мне нужно", "надо сделать", "идея", "план"
+- содержит важные данные пользователя:
+  - цели, планы, предпочтения, факты о себе, расписание, проекты
+- выглядит как список дел или пунктов
+- явно предназначено для сохранения на будущее
+
+НЕ считай заметкой:
+- вопросы
+- обсуждения
+- просьбы что-то объяснить
+- обычные разговорные реплики
+
+Если не уверен (заметка или вопрос), выбери режим chat и уточни.
+
+🔹 Определение тэгов (обязательно)
+
+Если сообщение — заметка, ты должен автоматически определить от 2 до 6 релевантных тэгов.
+
+Правила для тэгов:
+- Тэги должны быть короткими (1–2 слова).
+- На русском языке.
+- В формате #тэг
+- Без пробелов внутри (используй _ если нужно).
+- Тэги должны отражать смысл заметки.
+
+Примеры тэгов:
+#работа #идеи #проект #личное #задачи #финансы #здоровье #учёба #покупки #встречи #планы #книги #напоминание
+
+🔹 Формат сохранения заметки (Markdown)
+
+Если сообщение является заметкой — сформируй Markdown-запись по шаблону:
+
+## Заметка
+**Тэги:** #тэг1 #тэг2 #тэг3
+
+<краткий текст заметки>
+
+Если заметка содержит список задач, оформи их списком:
+
+## Заметка
+**Тэги:** #задачи #планы
+
+- пункт 1
+- пункт 2
+- пункт 3
+
+Дополнительные требования
+- Не выдумывай информацию.
+- Не добавляй лишние детали в заметку.
+- Не сохраняй конфиденциальные данные, если пользователь не просил явно.
+- Сохраняй заметки кратко, но понятно.
+- Если пользователь прислал несколько отдельных фактов — объедини в одну заметку.
+
+У тебя есть доступ к следующим инструментам:
+1. save_note - сохранить текст как Markdown файл в директорию notes
+2. search_notes - поиск текста в сохранённых заметках
+3. get_note - получить полное содержимое заметки по имени файла
+
+Если готов — начинай работу сразу с первого сообщения пользователя.
 """
     
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{input}"),
-        MessagesPlaceholder(variable_name="agent_scratchpad"),
-    ])
-    
-    # Создание агента
-    agent = create_openai_functions_agent(llm, tools, prompt)
-    
-    # Создание executor'а
-    agent_executor = AgentExecutor(
-        agent=agent,
+    agent_executor = create_langchain_agent(
+        model=llm,
         tools=tools,
-        verbose=True,
-        handle_parsing_errors=True,
+        system_prompt=system_prompt,
     )
     
     return agent_executor
@@ -160,9 +346,11 @@ def create_agent():
 def main():
     """Запустить интерактивный режим работы с агентом."""
     print("=" * 50)
-    print("🤖 AI Agent на базе LangChain")
+    print("🤖 AI Agent для работы с заметками")
     print("=" * 50)
     print()
+    
+    logger.info("=== Запуск AI Agent ===")
     
     try:
         agent = create_agent()
@@ -172,9 +360,8 @@ def main():
     
     print("✅ Агент успешно инициализирован!")
     print("Доступные команды:")
-    print("  • 'time' или 'время' - узнать текущее время")
-    print("  • 'calc' или 'посчитай' - калькулятор")
-    print("  • 'search' или 'найди' - поиск информации")
+    print("  • 'save' или 'сохрани' - сохранить заметку в Markdown")
+    print("  • 'find' или 'найди' - поиск в сохранённых заметках")
     print("  • 'exit' или 'выход' - завершить работу")
     print()
     
@@ -182,27 +369,39 @@ def main():
     
     while True:
         try:
-            user_input = input("👤 Вы: ").strip()
+            user_input = clean_text(input("👤 Вы: ")).strip()
             
             if not user_input:
                 continue
                 
             if user_input.lower() in ("exit", "выход", "quit", "q"):
                 print("\n👋 До свидания!")
+                logger.info("=== Сессия завершена пользователем ===")
                 break
             
+            logger.info(f"👤 USER INPUT: {user_input[:100]}...")
+            
             # Выполнение запроса
+            from langchain_core.messages import HumanMessage, AIMessage
+            
+            # Формируем сообщения с историей
+            messages = list(chat_history)
+            messages.append(HumanMessage(content=user_input))
+            
             result = agent.invoke({
-                "input": user_input,
-                "chat_history": chat_history,
+                "messages": messages,
             })
             
-            print(f"\n🤖 Агент: {result['output']}\n")
+            # Получаем ответ (последнее сообщение от AI)
+            output = result["messages"][-1].content
+            
+            logger.info(f"🤖 AGENT OUTPUT: {output[:100]}...")
+            
+            print(f"\n🤖 Агент: {clean_text(output)}\n")
             
             # Сохранение истории чата
-            from langchain_core.messages import HumanMessage, AIMessage
-            chat_history.append(HumanMessage(content=user_input))
-            chat_history.append(AIMessage(content=result['output']))
+            chat_history.append(HumanMessage(content=clean_text(user_input)))
+            chat_history.append(AIMessage(content=clean_text(output)))
             
             # Ограничение истории (последние 10 сообщений)
             chat_history = chat_history[-10:]
@@ -211,7 +410,8 @@ def main():
             print("\n\n👋 До свидания!")
             break
         except Exception as e:
-            print(f"\n❌ Ошибка: {str(e)}\n")
+            error_msg = clean_text(str(e))
+            print(f"\n❌ Ошибка: {error_msg}\n")
 
 
 if __name__ == "__main__":
