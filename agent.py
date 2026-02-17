@@ -60,9 +60,16 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI  # DeepSeek API совместим с OpenAI API
 from pydantic import BaseModel, Field
 
-
 # Загрузка переменных окружения
 load_dotenv()
+
+# Импорт векторного хранилища
+try:
+    from vector_store import get_vector_store, VectorStore
+    VECTOR_SEARCH_AVAILABLE = True
+except ImportError:
+    VECTOR_SEARCH_AVAILABLE = False
+    logger.warning("Модуль vector_store не найден. Семантический поиск недоступен.")
 
 
 # === Определение инструментов (Tools) ===
@@ -98,6 +105,22 @@ class SaveNoteTool(BaseTool):
         # Записываем содержимое в файл
         try:
             filepath.write_text(content, encoding="utf-8")
+            
+            # Индексируем в векторное хранилище (если доступно)
+            if VECTOR_SEARCH_AVAILABLE:
+                try:
+                    vector_store = get_vector_store()
+                    if vector_store.enabled:
+                        note_id = filepath.stem  # Имя файла без расширения
+                        vector_store.add_note(
+                            note_id=note_id,
+                            content=content,
+                            filename=filename,
+                            preview=content[:200]
+                        )
+                except Exception as e:
+                    logger.warning(f"Не удалось проиндексировать заметку в векторное хранилище: {e}")
+            
             result = f"✅ Заметка сохранена: {filepath}"
             logger.info(f"🔧 TOOL RESULT: save_note | {result}")
             return result
@@ -218,6 +241,66 @@ class GetNoteTool(BaseTool):
             return result
 
 
+class SemanticSearchInput(BaseModel):
+    """Входные параметры для семантического поиска."""
+    query: str = Field(description="Запрос для семантического поиска (смысловой поиск по заметкам)")
+    top_k: int = Field(default=5, description="Количество результатов (по умолчанию 5)")
+
+
+class SemanticSearchTool(BaseTool):
+    """Инструмент для семантического (векторного) поиска по заметкам."""
+    
+    name: str = "semantic_search"
+    description: str = "Семантический поиск по заметкам. Ищет заметки по смыслу, даже если используются другие слова. Требует настройки GIGACHAT_CLIENT_CREDENTIALS."
+    args_schema: Type[BaseModel] = SemanticSearchInput
+    
+    def _run(self, query: str, top_k: int = 5) -> str:
+        """Выполнить семантический поиск."""
+        logger.info(f"🔧 TOOL CALL: semantic_search | query: '{query}', top_k: {top_k}")
+        
+        if not VECTOR_SEARCH_AVAILABLE:
+            result = "❌ Семантический поиск недоступен. Модуль vector_store не установлен."
+            logger.error(f"🔧 TOOL RESULT: semantic_search | {result}")
+            return result
+        
+        try:
+            vector_store = get_vector_store()
+            
+            if not vector_store.enabled:
+                result = "❌ Семантический поиск не настроен. Добавьте GIGACHAT_CLIENT_CREDENTIALS в файл .env"
+                logger.error(f"🔧 TOOL RESULT: semantic_search | {result}")
+                return result
+            
+            # Очищаем запрос
+            query = clean_text(query)
+            
+            # Выполняем поиск
+            results = vector_store.search(query, top_k=top_k)
+            
+            if not results:
+                result_msg = f"🔍 По запросу '{query}' ничего не найдено семантически."
+                logger.info(f"🔧 TOOL RESULT: semantic_search | {result_msg}")
+                return result_msg
+            
+            # Форматируем результаты
+            formatted = [f"🔍 Семантический поиск: '{query}'\n"]
+            for i, r in enumerate(results, 1):
+                similarity_pct = int(r['similarity'] * 100)
+                formatted.append(
+                    f"{i}. 📄 {r['filename']} (сходство: {similarity_pct}%)\n"
+                    f"   📝 {r['preview'][:150]}..."
+                )
+            
+            result_msg = "\n\n".join(formatted)
+            logger.info(f"🔧 TOOL RESULT: semantic_search | found {len(results)} result(s)")
+            return result_msg
+            
+        except Exception as e:
+            result = f"❌ Ошибка семантического поиска: {str(e)}"
+            logger.error(f"🔧 TOOL RESULT: semantic_search | {result}")
+            return result
+
+
 # === Создание агента ===
 
 def create_agent():
@@ -246,6 +329,7 @@ def create_agent():
         SaveNoteTool(),
         SearchNotesTool(),
         GetNoteTool(),
+        SemanticSearchTool(),
     ]
     
     # Создание агента с использованием LangGraph
@@ -327,8 +411,18 @@ def create_agent():
 
 У тебя есть доступ к следующим инструментам:
 1. save_note - сохранить текст как Markdown файл в директорию notes
-2. search_notes - поиск текста в сохранённых заметках
+2. search_notes - поиск текста в сохранённых заметках (точное совпадение слов)
 3. get_note - получить полное содержимое заметки по имени файла
+4. semantic_search - семантический (векторный) поиск по смыслу
+
+🔹 Когда использовать semantic_search:
+- Когда пользователь ищет что-то по описанию, а не по точным словам
+- Примеры запросов: "что я планировал купить", "мои идеи для проекта", "планы на отпуск"
+- Этот поиск понимает смысл и находит релевантные заметки даже с другими словами
+
+🔹 Когда использовать search_notes (обычный поиск):
+- Когда нужно найти точное слово или фразу
+- Когда нужны конкретные совпадения в тексте
 
 Если готов — начинай работу сразу с первого сообщения пользователя.
 """
