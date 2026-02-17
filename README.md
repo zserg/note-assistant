@@ -48,7 +48,7 @@ cp .env.example .env
 # Отредактируйте .env и добавьте ваши ключи:
 # - DEEPSEEK_API_KEY (получить на https://platform.deepseek.com/)
 # - TELEGRAM_BOT_TOKEN (получить у @BotFather в Telegram, опционально)
-# - GIGACHAT_CLIENT_ID и GIGACHAT_CLIENT_SECRET (для семантического поиска, опционально)
+# - GIGACHAT_CLIENT_CREDENTIALS (для семантического поиска, опционально)
 ```
 
 ## Запуск
@@ -156,8 +156,7 @@ source venv/bin/activate && python telegram_bot.py
 ### Требования
 
 Для работы семантического поиска нужны:
-- `GIGACHAT_CLIENT_ID` — получить на [developers.sber.ru](https://developers.sber.ru/)
-- `GIGACHAT_CLIENT_SECRET` — получить там же
+- `GIGACHAT_CLIENT_CREDENTIALS` — base64-кодированная строка `client_id:client_secret`, получить credentials на [developers.sber.ru](https://developers.sber.ru/)
 
 Без этих ключей семантический поиск будет недоступен, но остальная функциональность работает.
 

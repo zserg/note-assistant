@@ -251,7 +251,7 @@ class SemanticSearchTool(BaseTool):
     """Инструмент для семантического (векторного) поиска по заметкам."""
     
     name: str = "semantic_search"
-    description: str = "Семантический поиск по заметкам. Ищет заметки по смыслу, даже если используются другие слова. Требует настройки GIGACHAT_CLIENT_ID и GIGACHAT_CLIENT_SECRET."
+    description: str = "Семантический поиск по заметкам. Ищет заметки по смыслу, даже если используются другие слова. Требует настройки GIGACHAT_CLIENT_CREDENTIALS."
     args_schema: Type[BaseModel] = SemanticSearchInput
     
     def _run(self, query: str, top_k: int = 5) -> str:
@@ -267,7 +267,7 @@ class SemanticSearchTool(BaseTool):
             vector_store = get_vector_store()
             
             if not vector_store.enabled:
-                result = "❌ Семантический поиск не настроен. Добавьте GIGACHAT_CLIENT_ID и GIGACHAT_CLIENT_SECRET в файл .env"
+                result = "❌ Семантический поиск не настроен. Добавьте GIGACHAT_CLIENT_CREDENTIALS в файл .env"
                 logger.error(f"🔧 TOOL RESULT: semantic_search | {result}")
                 return result
             

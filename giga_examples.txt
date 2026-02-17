@@ -1,0 +1,25 @@
+Для работы с библиотекой вам понадобятся ключ авторизации API и сертификаты Минцифры.
+
+Передайте полученный ключ авторизации в параметре credentials при инициализации объекта GigaChat.
+
+Пример запроса на генерацию ответа с помощью библиотеки GigaChat:
+
+from gigachat import GigaChat
+
+# Укажите ключ авторизации, полученный в личном кабинете, в интерфейсе проекта GigaChat API
+with GigaChat(credentials="ваш_ключ_авторизации") as giga:
+    response = giga.chat("Какие факторы влияют на стоимость страховки на дом?")
+    print(response.choices[0].message.content)
+
+
+    Создание эмбеддингов﻿
+Генерация векторного представления текста:
+
+from gigachat import GigaChat
+
+with GigaChat() as client:
+    result = client.embeddings(["Привет, мир!", "Машинное обучение интересно"])
+
+    for i, item in enumerate(result.data):
+        print(f"Текст {i + 1}: {len(item.embedding)} измерений")
+

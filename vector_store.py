@@ -2,133 +2,65 @@
 Модуль для семантического (векторного) поиска.
 
 Использует:
-- GigaChat API для получения эмбеддингов
+- GigaChat SDK (gigachat) для получения эмбеддингов
 - sqlite-vec для хранения и поиска векторов в SQLite
 """
 
 import os
 import json
-import uuid
 import logging
 import sqlite3
-import requests
-import base64
-import urllib3
-from datetime import datetime
-from typing import List, Dict, Optional, Tuple
-from pathlib import Path
+from typing import List, Dict, Optional
 
 import sqlite_vec
-
-# Отключаем предупреждения SSL (для тестового API Сбера)
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from gigachat import GigaChat
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logger = logging.getLogger("agent")
 
 
 class GigaChatEmbeddings:
-    """Клиент для получения эмбеддингов через GigaChat API."""
+    """Клиент для получения эмбеддингов через GigaChat SDK."""
     
     def __init__(self):
-        self.client_id = os.getenv("GIGACHAT_CLIENT_ID")
-        self.client_secret = os.getenv("GIGACHAT_CLIENT_SECRET")
-        self.access_token: Optional[str] = None
-        self.token_expires_at: Optional[datetime] = None
-        self.base_url = "https://gigachat.devices.sberbank.ru/api/v1"
-        self.auth_url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+        self.credentials = os.getenv("GIGACHAT_CLIENT_CREDENTIALS")
         
-        if not self.client_id or self.client_id == "your_gigachat_client_id_here":
-            logger.warning("GIGACHAT_CLIENT_ID не настроен. Семантический поиск недоступен.")
-            self.enabled = False
-        elif not self.client_secret or self.client_secret == "your_gigachat_client_secret_here":
-            logger.warning("GIGACHAT_CLIENT_SECRET не настроен. Семантический поиск недоступен.")
+        if not self.credentials or self.credentials == "your_gigachat_client_credentials_here":
+            logger.warning("GIGACHAT_CLIENT_CREDENTIALS не настроен. Семантический поиск недоступен.")
             self.enabled = False
         else:
             self.enabled = True
     
-    def _get_access_token(self) -> str:
-        """Получить или обновить OAuth токен."""
-        # Проверяем, не истёк ли текущий токен
-        if self.access_token and self.token_expires_at:
-            if datetime.now() < self.token_expires_at:
-                return self.access_token
-        
-        logger.debug("Запрос нового access token для GigaChat...")
-        
-        credentials = base64.b64encode(
-            f"{self.client_id}:{self.client_secret}".encode()
-        ).decode()
-        
-        try:
-            response = requests.post(
-                self.auth_url,
-                headers={
-                    "Authorization": f"Basic {credentials}",
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Accept": "application/json",
-                    "RqUID": str(uuid.uuid4())
-                },
-                data={"scope": "GIGACHAT_API_PERS"},
-                verify=False,
-                timeout=30
-            )
-            response.raise_for_status()
-            data = response.json()
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True
+    )
+    def _get_embeddings_with_retry(self, texts: List[str]) -> List[List[float]]:
+        """Внутренний метод с retry для получения эмбеддингов."""
+        with GigaChat(
+            credentials=self.credentials,
+            verify_ssl_certs=False,  # Для тестового API Сбера
+        ) as client:
+            result = client.embeddings(texts)
             
-            self.access_token = data["access_token"]
-            # Токен живёт ~30 минут, ставим запас 5 минут
-            expires_in = data.get("expires_at", 1800) - 300
-            self.token_expires_at = datetime.now().timestamp() + expires_in
-            
-            logger.debug("Access token получен успешно")
-            return self.access_token
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Ошибка получения токена GigaChat: {e}")
-            raise
+            # Сортируем по индексу, так как API может вернуть в другом порядке
+            embeddings = sorted(result.data, key=lambda x: x.index)
+            return [item.embedding for item in embeddings]
     
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Получить эмбеддинги для списка документов."""
         if not self.enabled:
-            raise ValueError("GigaChat API не настроен. Проверьте GIGACHAT_CLIENT_ID и GIGACHAT_CLIENT_SECRET")
+            raise ValueError("GigaChat API не настроен. Проверьте GIGACHAT_CLIENT_CREDENTIALS")
         
         if not texts:
             return []
         
-        # Ограничение API: максимум 100 текстов за раз
-        if len(texts) > 100:
-            logger.warning(f"Слишком много текстов ({len(texts)}), разбиваем на батчи")
-            results = []
-            for i in range(0, len(texts), 100):
-                batch = texts[i:i+100]
-                results.extend(self.embed_documents(batch))
-            return results
-        
-        token = self._get_access_token()
-        
         try:
-            response = requests.post(
-                f"{self.base_url}/embeddings",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "Embeddings",
-                    "input": texts
-                },
-                verify=False,
-                timeout=60
-            )
-            response.raise_for_status()
-            data = response.json()
-            
-            # Сортируем по индексу, так как API может вернуть в другом порядке
-            embeddings = sorted(data["data"], key=lambda x: x["index"])
-            return [item["embedding"] for item in embeddings]
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Ошибка получения эмбеддингов: {e}")
+            return self._get_embeddings_with_retry(texts)
+        except Exception as e:
+            logger.error(f"Ошибка получения эмбеддингов после всех попыток: {e}")
             raise
     
     def embed_query(self, text: str) -> List[float]:
@@ -151,17 +83,18 @@ class VectorStore:
     def _init_db(self):
         """Инициализировать базу данных."""
         try:
+            logger.info(f"sqlite start")
             conn = sqlite3.connect(self.db_path)
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
             
+            logger.info(f"sqlite start cp0")
             # Создаём виртуальную таблицу для векторов
             conn.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS note_vectors USING vec0(
-                    note_id TEXT PRIMARY KEY,
                     embedding FLOAT[{self.dimension}],
+                    +note_id TEXT,
                     +filename TEXT,
-                    +created_at TIMESTAMP,
                     +preview TEXT
                 )
             """)
@@ -181,8 +114,10 @@ class VectorStore:
             return False
         
         try:
-            # Получаем эмбеддинг
+            logger.info(f"embedding cp0")
+            # Получаем эмбеддинг через GigaChat SDK
             embedding = self.embeddings.embed_query(content)
+            logger.info(f"embedding cp1")
             
             # Формируем preview (первые 200 символов)
             if preview is None:
@@ -191,18 +126,20 @@ class VectorStore:
             conn = sqlite3.connect(self.db_path)
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
+            logger.info(f"embedding cp2")
             
             # Сериализуем вектор в JSON для sqlite-vec
             embedding_json = json.dumps(embedding)
             
             # Удаляем старую запись если есть
             conn.execute("DELETE FROM note_vectors WHERE note_id = ?", (note_id,))
+            logger.info(f"embedding cp3")
             
             # Добавляем новую
             conn.execute("""
-                INSERT INTO note_vectors (note_id, embedding, filename, created_at, preview)
-                VALUES (?, vec_f32(?), ?, ?, ?)
-            """, (note_id, embedding_json, filename, datetime.now().isoformat(), preview))
+                INSERT INTO note_vectors (embedding, note_id, filename, preview)
+                VALUES (vec_f32(?), ?, ?, ?)
+            """, (embedding_json, note_id, filename, preview))
             
             conn.commit()
             conn.close()
@@ -220,7 +157,7 @@ class VectorStore:
             return []
         
         try:
-            # Получаем эмбеддинг запроса
+            # Получаем эмбеддинг запроса через GigaChat SDK
             query_embedding = self.embeddings.embed_query(query)
             query_json = json.dumps(query_embedding)
             
@@ -234,7 +171,6 @@ class VectorStore:
                     note_id,
                     filename,
                     preview,
-                    created_at,
                     vec_distance_cosine(embedding, vec_f32(?)) as distance
                 FROM note_vectors
                 ORDER BY distance
@@ -246,14 +182,13 @@ class VectorStore:
             # Форматируем результаты
             formatted_results = []
             for row in results:
-                note_id, filename, preview, created_at, distance = row
+                note_id, filename, preview, distance = row
                 # distance = 1 - cosine_similarity, поэтому similarity = 1 - distance
                 similarity = 1 - distance
                 formatted_results.append({
                     "note_id": note_id,
                     "filename": filename,
                     "preview": preview,
-                    "created_at": created_at,
                     "similarity": round(similarity, 4)
                 })
             
