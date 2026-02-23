@@ -301,6 +301,132 @@ class SemanticSearchTool(BaseTool):
             return result
 
 
+class UpdateNoteInput(BaseModel):
+    """Входные параметры для обновления заметки."""
+    filename: str = Field(description="Имя файла заметки для обновления (например: 2026-02-13_21-54-01.md)")
+    content: str = Field(description="Новое содержимое заметки в формате Markdown")
+
+
+class UpdateNoteTool(BaseTool):
+    """Инструмент для обновления существующей заметки."""
+    
+    name: str = "update_note"
+    description: str = "Обновляет содержимое существующей заметки по имени файла. Используй для изменения или исправления заметок."
+    args_schema: Type[BaseModel] = UpdateNoteInput
+    
+    def _run(self, filename: str, content: str) -> str:
+        """Обновить заметку по имени файла."""
+        logger.info(f"🔧 TOOL CALL: update_note | filename: '{filename}'")
+        logger.debug(f"update_note | content preview: {content[:100]}...")
+        
+        # Очищаем текст
+        filename = clean_text(filename).strip()
+        content = clean_text(content)
+        
+        notes_dir = Path("notes")
+        filepath = notes_dir / filename
+        
+        # Проверяем безопасность пути
+        try:
+            filepath.resolve().relative_to(notes_dir.resolve())
+        except ValueError:
+            result = "❌ Некорректное имя файла."
+            logger.error(f"🔧 TOOL RESULT: update_note | {result}")
+            return result
+        
+        if not filepath.exists():
+            result = f"❌ Файл '{filename}' не найден. Сначала создайте заметку."
+            logger.warning(f"🔧 TOOL RESULT: update_note | {result}")
+            return result
+        
+        try:
+            # Записываем новое содержимое
+            filepath.write_text(content, encoding="utf-8")
+            
+            # Обновляем в векторном хранилище
+            if VECTOR_SEARCH_AVAILABLE:
+                try:
+                    vector_store = get_vector_store()
+                    if vector_store.enabled:
+                        note_id = filepath.stem
+                        vector_store.add_note(
+                            note_id=note_id,
+                            content=content,
+                            filename=filename,
+                            preview=content[:200]
+                        )
+                except Exception as e:
+                    logger.warning(f"Не удалось обновить заметку в векторном хранилище: {e}")
+            
+            result = f"✅ Заметка обновлена: {filepath}"
+            logger.info(f"🔧 TOOL RESULT: update_note | {result}")
+            return result
+            
+        except Exception as e:
+            result = f"❌ Ошибка обновления: {str(e)}"
+            logger.error(f"🔧 TOOL RESULT: update_note | {result}")
+            return result
+
+
+class DeleteNoteInput(BaseModel):
+    """Входные параметры для удаления заметки."""
+    filename: str = Field(description="Имя файла заметки для удаления (например: 2026-02-13_21-54-01.md)")
+
+
+class DeleteNoteTool(BaseTool):
+    """Инструмент для удаления заметки."""
+    
+    name: str = "delete_note"
+    description: str = "Удаляет заметку по имени файла. Операция необратима."
+    args_schema: Type[BaseModel] = DeleteNoteInput
+    
+    def _run(self, filename: str) -> str:
+        """Удалить заметку по имени файла."""
+        logger.info(f"🔧 TOOL CALL: delete_note | filename: '{filename}'")
+        
+        # Очищаем имя файла
+        filename = clean_text(filename).strip()
+        
+        notes_dir = Path("notes")
+        filepath = notes_dir / filename
+        
+        # Проверяем безопасность пути
+        try:
+            filepath.resolve().relative_to(notes_dir.resolve())
+        except ValueError:
+            result = "❌ Некорректное имя файла."
+            logger.error(f"🔧 TOOL RESULT: delete_note | {result}")
+            return result
+        
+        if not filepath.exists():
+            result = f"❌ Файл '{filename}' не найден."
+            logger.warning(f"🔧 TOOL RESULT: delete_note | {result}")
+            return result
+        
+        try:
+            # Удаляем файл
+            filepath.unlink()
+            
+            # Удаляем из векторного хранилища
+            if VECTOR_SEARCH_AVAILABLE:
+                try:
+                    vector_store = get_vector_store()
+                    if vector_store.enabled:
+                        note_id = filepath.stem
+                        vector_store.delete_note(note_id)
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить заметку из векторного хранилища: {e}")
+            
+            result = f"🗑️ Заметка удалена: {filename}"
+            logger.info(f"🔧 TOOL RESULT: delete_note | {result}")
+            return result
+            
+        except Exception as e:
+            result = f"❌ Ошибка удаления: {str(e)}"
+            logger.error(f"🔧 TOOL RESULT: delete_note | {result}")
+            return result
+
+
 # === Создание агента ===
 
 def create_agent():
@@ -330,6 +456,8 @@ def create_agent():
         SearchNotesTool(),
         GetNoteTool(),
         SemanticSearchTool(),
+        UpdateNoteTool(),
+        DeleteNoteTool(),
     ]
     
     # Создание агента с использованием LangGraph
@@ -414,6 +542,8 @@ def create_agent():
 2. search_notes - поиск текста в сохранённых заметках (точное совпадение слов)
 3. get_note - получить полное содержимое заметки по имени файла
 4. semantic_search - семантический (векторный) поиск по смыслу
+5. update_note - обновить содержимое существующей заметки по имени файла
+6. delete_note - удалить заметку по имени файла (операция необратима)
 
 🔹 Когда использовать semantic_search:
 - Когда пользователь ищет что-то по описанию, а не по точным словам
