@@ -2,6 +2,9 @@
 
 AI агент на базе [LangChain](https://www.langchain.com/) для управления заметками в Markdown формате. Поддерживает работу через консоль и Telegram.
 
+
+- 🖼️ **Обработка изображений** — распознавание текста (OCR) с фото через Yandex Vision
+
 ## Возможности
 
 - 💾 **Сохранение заметок** — автоматическое определение и сохранение важной информации
@@ -19,6 +22,7 @@ AI агент на базе [LangChain](https://www.langchain.com/) для уп�
 ├── notes/                # Директория с сохранёнными заметками (Markdown)
 ├── vector_store.db       # SQLite база для векторного поиска
 ├── vector_store.py       # Модуль семантического поиска (GigaChat + sqlite-vec)
+├── yandex_vision.py      # Модуль обработки изображений (Yandex Vision OCR)
 ├── .env                  # Переменные окружения (создайте из .env.example)
 ├── .env.example          # Пример конфигурации
 ├── requirements.txt      # Зависимости проекта
@@ -39,6 +43,8 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+> **Примечание:** Для работы с изображениями также требуется `pillow` (включён в requirements.txt).
+
 ### 2. Настройка API ключей
 
 ```bash
@@ -49,6 +55,7 @@ cp .env.example .env
 # - DEEPSEEK_API_KEY (получить на https://platform.deepseek.com/)
 # - TELEGRAM_BOT_TOKEN (получить у @BotFather в Telegram, опционально)
 # - GIGACHAT_CLIENT_CREDENTIALS (для семантического поиска, опционально)
+# - YANDEX_VISION_FOLDER_ID и YANDEX_VISION_IAM_TOKEN (для OCR, опционально)
 ```
 
 ## Запуск
@@ -143,6 +150,10 @@ source venv/bin/activate && python telegram_bot.py
 2. **`search_notes`** — ищет текст во всех сохранённых заметках (точное совпадение)
 3. **`semantic_search`** — семантический (векторный) поиск по смыслу с помощью GigaChat Embeddings
 4. **`get_note`** — возвращает полное содержимое заметки по имени файла
+5. **`update_note`** — обновляет существующую заметку по имени файла
+6. **`delete_note`** — удаляет заметку по имени файла
+7. **`web_search`** — поиск в интернете через Brave Search API
+8. **`analyze_image`** — анализ изображения с помощью Yandex Vision (OCR)
 
 ## Семантический поиск
 
@@ -159,6 +170,51 @@ source venv/bin/activate && python telegram_bot.py
 - `GIGACHAT_CLIENT_CREDENTIALS` — base64-кодированная строка `client_id:client_secret`, получить credentials на [developers.sber.ru](https://developers.sber.ru/)
 
 Без этих ключей семантический поиск будет недоступен, но остальная функциональность работает.
+
+## Обработка изображений
+
+Агент может анализировать изображения и распознавать текст (OCR) с помощью **Yandex Vision OCR API**.
+
+### Возможности
+
+- 📷 **Распознавание текста** — извлечение текста с фотографий, скриншотов, документов
+- 🌐 **Автоопределение языка** — автоматически определяет язык текста (или можно указать вручную)
+- 📄 **Поддержка форматов** — JPEG, PNG, PDF (1 страница)
+- 🧠 **Автоматический анализ** — агент сам определяет, что делать с распознанным текстом
+- 💾 **Сохранение из заметок** — если на фото заметка, агент предложит её сохранить
+
+### Использование в Telegram
+
+Просто отправьте фото боту:
+- Бот автоматически распознает текст на изображении
+- Если есть подпись к фото — агент ответит на неё с учётом содержимого
+- Распознанный текст можно сохранить как заметку
+
+### Настройка Yandex Vision OCR
+
+1. Создайте аккаунт в [Yandex Cloud](https://cloud.yandex.ru/)
+2. Создайте [сервисный аккаунт](https://cloud.yandex.ru/docs/iam/operations/sa/create) и получите IAM-токен или API ключ
+3. Узнайте [ID каталога](https://console.cloud.yandex.ru/folders) (Folder ID)
+4. Добавьте в `.env`:
+   ```
+   YANDEX_VISION_FOLDER_ID=your_folder_id
+   YANDEX_VISION_IAM_TOKEN=your_iam_token
+   # или
+   YANDEX_VISION_API_KEY=your_api_key
+   ```
+
+Без этих ключей обработка изображений будет недоступна.
+
+### Документация API
+
+- [Распознавание текста на изображениях](https://yandex.cloud/en/docs/vision/operations/ocr/text-detection-image)
+- [OCR API Reference](https://yandex.cloud/en/docs/vision/ocr/api-ref/TextRecognition/recognize)
+
+### Модели распознавания
+
+- `page` (по умолчанию) — для распознавания текста на страницах документов
+- `line` — для распознавания отдельных строк текста
+- `table` — для распознавания таблиц
 
 ## Формат заметок
 

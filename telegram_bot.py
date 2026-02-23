@@ -12,6 +12,7 @@ Telegram Bot для AI Agent.
 import os
 import sys
 import asyncio
+import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -22,6 +23,14 @@ load_dotenv()
 # Импортируем агента и логгер из agent.py
 from agent import create_agent, clean_text, logger
 from langchain_core.messages import HumanMessage, AIMessage
+
+# Импортируем Yandex Vision для обработки изображений
+try:
+    from yandex_vision import get_vision_client
+    YANDEX_VISION_AVAILABLE = True
+except ImportError:
+    YANDEX_VISION_AVAILABLE = False
+    logger.warning("Модуль yandex_vision не найден. Обработка изображений недоступна.")
 
 # Telegram imports
 from telegram import Update
@@ -86,8 +95,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• 🔍 Искать по сохранённым заметкам\n"
         "• 📄 Показывать содержимое заметок\n"
         "• ✏️ Обновлять существующие заметки\n"
-        "• 🗑️ Удалять заметки\n\n"
-        "Просто напиши мне что угодно!\n\n"
+        "• 🗑️ Удалять заметки\n"
+        "• 🖼️ Распознавать текст с фото (OCR)\n\n"
+        "Просто напиши мне что угодно или отправь фото!\n\n"
         "Команды:\n"
         "/start — начать работу\n"
         "/clear — очистить историю чата\n"
@@ -124,6 +134,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• `покажи заметку <имя_файла>` — просмотр заметки\n"
         "• `обнови заметку <имя_файла>` — изменение заметки\n"
         "• `удали заметку <имя_файла>` — удаление заметки\n\n"
+        "*Обработка изображений:*\n"
+        "Отправь фото — я распознаю текст (OCR) и проанализирую содержимое.\n"
+        "Можешь добавить подпись к фото с вопросом или указанием, что сделать.\n\n"
         "*Команды бота:*\n"
         "/start — начать работу\n"
         "/clear — очистить историю чата\n"
@@ -224,6 +237,150 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик фотографий."""
+    # Проверка авторизации
+    if not is_authorized(update.effective_user.id):
+        await unauthorized_message(update)
+        return
+    
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    
+    logger.info(f"📷 Telegram user {user.id} ({user.username or user.first_name}) отправил фото")
+    
+    # Проверяем доступность Yandex Vision
+    if not YANDEX_VISION_AVAILABLE:
+        await update.message.reply_text(
+            "❌ Обработка изображений недоступна.\n"
+            "Модуль yandex_vision не установлен."
+        )
+        return
+    
+    vision_client = get_vision_client()
+    if not vision_client.enabled:
+        await update.message.reply_text(
+            "❌ Yandex Vision не настроен.\n"
+            "Добавьте YANDEX_VISION_FOLDER_ID и YANDEX_VISION_IAM_TOKEN (или YANDEX_VISION_API_KEY) в файл .env"
+        )
+        return
+    
+    # Показываем статус "печатает"
+    await update.message.chat.send_action(action="typing")
+    
+    try:
+        # Получаем фото максимального качества
+        photo = update.message.photo[-1]  # Последнее - максимальное качество
+        file = await context.bot.get_file(photo.file_id)
+        
+        # Создаём временный файл
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
+            temp_path = temp_file.name
+        
+        try:
+            # Скачиваем файл
+            await file.download_to_drive(temp_path)
+            logger.info(f"📷 Фото сохранено: {temp_path}")
+            
+            # Получаем подпись к фото (если есть)
+            caption = update.message.caption
+            if caption:
+                caption = clean_text(caption).strip()
+            
+            # Анализируем изображение с помощью Yandex Vision
+            with open(temp_path, "rb") as f:
+                image_bytes = f.read()
+            
+            analysis = vision_client.analyze_image(image_bytes)
+            
+            if analysis is None:
+                await update.message.reply_text(
+                    "❌ Не удалось проанализировать изображение.\n"
+                    "Попробуйте ещё раз позже."
+                )
+                return
+            
+            # Формируем сообщение для агента
+            analysis_text = analysis.text if analysis.text else ""
+            
+            if caption:
+                # Если есть подпись, используем её вместе с распознанным текстом
+                user_message = f"[Пользователь отправил фото с подписью: \"{caption}\"]\n\n"
+                if analysis_text:
+                    user_message += f"На фото распознан следующий текст:\n```\n{analysis_text}\n```\n\n"
+                    user_message += f"Проанализируй изображение и текст на нём. Ответь на вопрос из подписи, если он есть."
+                else:
+                    user_message += "На фото текст не обнаружен. Прокомментируй, что ты видишь на изображении."
+            else:
+                # Если подписи нет, просто анализируем изображение
+                if analysis_text:
+                    user_message = f"[Пользователь отправил фото с текстом]\n\n"
+                    user_message += f"На фото распознан следующий текст:\n```\n{analysis_text}\n```\n\n"
+                    user_message += f"Сохрани этот текст как заметку, если это заметка. Или ответь на содержимое, если это вопрос."
+                else:
+                    user_message = "[Пользователь отправил фото без текста]\n\n"
+                    user_message += "На фото текст не обнаружен. Сообщи пользователю, что ты не видишь распознаваемого текста на изображении."
+            
+            # Получаем или создаём историю чата
+            if chat_id not in chat_histories:
+                chat_histories[chat_id] = []
+            
+            chat_history = chat_histories[chat_id]
+            
+            # Создаём агента
+            if not hasattr(context.application, "agent"):
+                context.application.agent = create_agent()
+            agent = context.application.agent
+            
+            # Формируем сообщения с историей
+            messages = list(chat_history)
+            messages.append(HumanMessage(content=user_message))
+            
+            # Показываем статус "печатает"
+            await update.message.chat.send_action(action="typing")
+            
+            # Вызываем агента
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, 
+                lambda: agent.invoke({"messages": messages})
+            )
+            
+            # Получаем ответ
+            output = result["messages"][-1].content
+            output = clean_text(output)
+            
+            logger.info(f"🤖 Agent response to photo from {user.id}: {output[:100]}...")
+            
+            # Отправляем ответ
+            MAX_MESSAGE_LENGTH = 4000
+            if len(output) <= MAX_MESSAGE_LENGTH:
+                await update.message.reply_text(output)
+            else:
+                for i in range(0, len(output), MAX_MESSAGE_LENGTH):
+                    chunk = output[i:i + MAX_MESSAGE_LENGTH]
+                    await update.message.reply_text(chunk)
+            
+            # Сохраняем историю чата
+            chat_history.append(HumanMessage(content=user_message))
+            chat_history.append(AIMessage(content=output))
+            chat_histories[chat_id] = chat_history[-10:]
+            
+        finally:
+            # Удаляем временный файл
+            try:
+                os.unlink(temp_path)
+            except Exception as e:
+                logger.warning(f"Не удалось удалить временный файл: {e}")
+                
+    except Exception as e:
+        error_msg = clean_text(str(e))
+        logger.error(f"❌ Error processing photo from {user.id}: {error_msg}")
+        await update.message.reply_text(
+            f"❌ Произошла ошибка при обработке изображения.\n"
+            f"Попробуйте позже или обратитесь к администратору."
+        )
+
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик ошибок."""
     logger.error(f"⚠️ Telegram error: {context.error}")
@@ -285,6 +442,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("clear", clear_command))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # Регистрируем обработчик ошибок

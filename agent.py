@@ -72,6 +72,14 @@ except ImportError:
     VECTOR_SEARCH_AVAILABLE = False
     logger.warning("Модуль vector_store не найден. Семантический поиск недоступен.")
 
+# Импорт Yandex Vision
+try:
+    from yandex_vision import get_vision_client, ImageAnalysisResult
+    YANDEX_VISION_AVAILABLE = True
+except ImportError:
+    YANDEX_VISION_AVAILABLE = False
+    logger.warning("Модуль yandex_vision не найден. Обработка изображений недоступна.")
+
 
 # === Определение инструментов (Tools) ===
 
@@ -540,6 +548,73 @@ class WebSearchTool(BaseTool):
             return result
 
 
+class AnalyzeImageInput(BaseModel):
+    """Входные параметры для анализа изображения."""
+    image_path: str = Field(description="Путь к файлу изображения для анализа")
+
+
+class AnalyzeImageTool(BaseTool):
+    """Инструмент для анализа изображений с помощью Yandex Vision."""
+    
+    name: str = "analyze_image"
+    description: str = "Анализирует изображение с помощью Yandex Vision. Распознаёт текст (OCR) и описывает содержимое. Требует YANDEX_VISION_FOLDER_ID и авторизацию в .env"
+    args_schema: Type[BaseModel] = AnalyzeImageInput
+    
+    def _run(self, image_path: str) -> str:
+        """Проанализировать изображение."""
+        logger.info(f"🔧 TOOL CALL: analyze_image | image_path: '{image_path}'")
+        
+        if not YANDEX_VISION_AVAILABLE:
+            result = "❌ Анализ изображений недоступен. Модуль yandex_vision не установлен."
+            logger.error(f"🔧 TOOL RESULT: analyze_image | {result}")
+            return result
+        
+        # Проверяем существование файла
+        from pathlib import Path
+        path = Path(image_path)
+        if not path.exists():
+            result = f"❌ Файл не найден: {image_path}"
+            logger.error(f"🔧 TOOL RESULT: analyze_image | {result}")
+            return result
+        
+        try:
+            client = get_vision_client()
+            
+            if not client.enabled:
+                result = "❌ Yandex Vision не настроен. Добавьте YANDEX_VISION_FOLDER_ID и YANDEX_VISION_IAM_TOKEN (или YANDEX_VISION_API_KEY) в файл .env"
+                logger.error(f"🔧 TOOL RESULT: analyze_image | {result}")
+                return result
+            
+            # Читаем файл
+            with open(image_path, "rb") as f:
+                image_bytes = f.read()
+            
+            # Анализируем изображение
+            analysis = client.analyze_image(image_bytes)
+            
+            if analysis is None:
+                result = "❌ Не удалось проанализировать изображение. Проверьте логи."
+                logger.error(f"🔧 TOOL RESULT: analyze_image | {result}")
+                return result
+            
+            # Формируем результат
+            result_lines = ["📷 **Результат анализа изображения**\n"]
+            
+            if analysis.text:
+                result_lines.append(f"**Распознанный текст:**\n```\n{analysis.text}\n```")
+            else:
+                result_lines.append("*Текст на изображении не обнаружен.*")
+            
+            result_msg = "\n\n".join(result_lines)
+            logger.info(f"🔧 TOOL RESULT: analyze_image | success, text length: {len(analysis.text) if analysis.text else 0} chars")
+            return result_msg
+            
+        except Exception as e:
+            result = f"❌ Ошибка анализа изображения: {str(e)}"
+            logger.error(f"🔧 TOOL RESULT: analyze_image | {result}")
+            return result
+
+
 # === Создание агента ===
 
 def create_agent():
@@ -572,6 +647,7 @@ def create_agent():
         UpdateNoteTool(),
         DeleteNoteTool(),
         WebSearchTool(),
+        AnalyzeImageTool(),
     ]
     
     # Создание агента с использованием LangGraph
@@ -659,6 +735,7 @@ def create_agent():
 5. update_note - обновить содержимое существующей заметки по имени файла
 6. delete_note - удалить заметку по имени файла (операция необратима)
 7. web_search - поиск актуальной информации в интернете через Brave Search
+8. analyze_image - анализ изображения с помощью Yandex Vision (OCR и описание)
 
 🔹 Когда использовать web_search:
 - Когда нужна актуальная информация из интернета (новости, погода, курсы валют, события)
