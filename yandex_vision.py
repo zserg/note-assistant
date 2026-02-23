@@ -163,10 +163,12 @@ class YandexVisionClient:
             data = response.json()
             
             # Извлекаем результаты из нового формата ответа
-            text_annotation = data.get("textAnnotation", {})
+            # Ответ обёрнут в поле "result"
+            result = data.get("result", {})
+            text_annotation = result.get("textAnnotation", {}) if result else {}
             
             if not text_annotation:
-                logger.warning("Yandex OCR API: textAnnotation отсутствует в ответе")
+                logger.warning(f"Yandex OCR API: textAnnotation отсутствует в ответе. Response keys: {list(data.keys())}")
                 return None
             
             # Получаем полный текст (fullText)
