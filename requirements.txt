@@ -7,3 +7,4 @@ sqlite-vec>=0.1.0
 requests>=2.32.0
 gigachat>=0.1.41
 tenacity>=8.0.0
+brave-search>=0.1.0

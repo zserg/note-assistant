@@ -7,10 +7,11 @@ AI Agent на базе LangChain.
 import os
 import sys
 import logging
-from typing import Type
+from typing import Type, Optional
 from datetime import datetime
 from pathlib import Path
 
+import requests
 from dotenv import load_dotenv
 
 
@@ -427,6 +428,118 @@ class DeleteNoteTool(BaseTool):
             return result
 
 
+class WebSearchInput(BaseModel):
+    """Входные параметры для web поиска."""
+    query: str = Field(description="Поисковый запрос")
+    max_results: int = Field(default=5, description="Количество результатов (1-10)")
+
+
+class WebSearchTool(BaseTool):
+    """Инструмент для поиска в интернете через Brave Search API."""
+    
+    name: str = "web_search"
+    description: str = "Поиск актуальной информации в интернете через Brave Search. Используй для получения свежих данных, новостей, фактов, которые могли измениться. Требует BRAVE_API_KEY в .env"
+    args_schema: Type[BaseModel] = WebSearchInput
+    
+    def _run(self, query: str, max_results: int = 5) -> str:
+        """Выполнить поиск через Brave Search API."""
+        logger.info(f"🔧 TOOL CALL: web_search | query: '{query}', max_results: {max_results}")
+        
+        # Получаем API ключ
+        api_key = os.getenv("BRAVE_API_KEY")
+        if not api_key or api_key == "your_brave_api_key_here":
+            result = "❌ Brave Search API ключ не настроен. Добавьте BRAVE_API_KEY в файл .env"
+            logger.error(f"🔧 TOOL RESULT: web_search | {result}")
+            return result
+        
+        # Ограничиваем количество результатов
+        max_results = max(1, min(10, max_results))
+        
+        # Очищаем запрос
+        query = clean_text(query).strip()
+        if not query:
+            result = "❌ Пустой поисковый запрос"
+            logger.error(f"🔧 TOOL RESULT: web_search | {result}")
+            return result
+        
+        try:
+            # Выполняем запрос к Brave API
+            headers = {
+                "X-Subscription-Token": api_key,
+                "Accept": "application/json",
+            }
+            params = {
+                "q": query,
+                "count": max_results,
+                "text_decorations": False,
+                "search_lang": "ru",
+            }
+            
+            response = requests.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                headers=headers,
+                params=params,
+                timeout=30
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            # Извлекаем результаты
+            web_results = data.get("web", {}).get("results", [])
+            
+            if not web_results:
+                result_msg = f"🔍 По запросу '{query}' ничего не найдено."
+                logger.info(f"🔧 TOOL RESULT: web_search | {result_msg}")
+                return result_msg
+            
+            # Форматируем результаты
+            formatted = [f"🔍 Результаты поиска: '{query}'\n"]
+            
+            for i, r in enumerate(web_results[:max_results], 1):
+                title = r.get("title", "Без названия")
+                url = r.get("url", "")
+                description = r.get("description", "")
+                
+                # Дополнительные сниппеты если есть
+                extra_snippets = r.get("extra_snippets", [])
+                if extra_snippets:
+                    description += " " + " ".join(extra_snippets[:2])
+                
+                # Обрезаем описание
+                if len(description) > 300:
+                    description = description[:300] + "..."
+                
+                formatted.append(
+                    f"{i}. **{title}**\n"
+                    f"   🌐 {url}\n"
+                    f"   📝 {description}\n"
+                )
+            
+            result_msg = "\n".join(formatted)
+            logger.info(f"🔧 TOOL RESULT: web_search | found {len(web_results)} result(s)")
+            return result_msg
+            
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 401:
+                result = "❌ Ошибка авторизации Brave API. Проверьте BRAVE_API_KEY."
+            elif e.response.status_code == 429:
+                result = "❌ Превышен лимит запросов Brave API. Попробуйте позже."
+            else:
+                result = f"❌ Ошибка Brave API: {e.response.status_code}"
+            logger.error(f"🔧 TOOL RESULT: web_search | {result}")
+            return result
+            
+        except requests.exceptions.RequestException as e:
+            result = f"❌ Ошибка сети при поиске: {str(e)}"
+            logger.error(f"🔧 TOOL RESULT: web_search | {result}")
+            return result
+            
+        except Exception as e:
+            result = f"❌ Ошибка при выполнении поиска: {str(e)}"
+            logger.error(f"🔧 TOOL RESULT: web_search | {result}")
+            return result
+
+
 # === Создание агента ===
 
 def create_agent():
@@ -458,6 +571,7 @@ def create_agent():
         SemanticSearchTool(),
         UpdateNoteTool(),
         DeleteNoteTool(),
+        WebSearchTool(),
     ]
     
     # Создание агента с использованием LangGraph
@@ -544,6 +658,13 @@ def create_agent():
 4. semantic_search - семантический (векторный) поиск по смыслу
 5. update_note - обновить содержимое существующей заметки по имени файла
 6. delete_note - удалить заметку по имени файла (операция необратима)
+7. web_search - поиск актуальной информации в интернете через Brave Search
+
+🔹 Когда использовать web_search:
+- Когда нужна актуальная информация из интернета (новости, погода, курсы валют, события)
+- Когда пользователь спрашивает о чём-то, что произошло недавно
+- Когда нужно проверить факты или получить свежие данные
+- НЕ используй для поиска в своих заметках — для этого есть search_notes и semantic_search
 
 🔹 Когда использовать semantic_search:
 - Когда пользователь ищет что-то по описанию, а не по точным словам
