@@ -104,7 +104,7 @@ class YandexCLITokenManager:
             True если токен успешно получен, иначе False
         """
         try:
-            logger.debug("Запрос нового IAM токена через YC CLI...")
+            logger.info("Запрос нового IAM токена через YC CLI...")
             
             result = subprocess.run(
                 ["yc", "iam", "create-token"],
