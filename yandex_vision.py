@@ -16,6 +16,9 @@
 import os
 import base64
 import logging
+import subprocess
+import threading
+import time
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 
@@ -48,6 +51,123 @@ class ImageAnalysisResult:
     text: Optional[str]
 
 
+class YandexCLITokenManager:
+    """
+    Менеджер для автоматического обновления IAM токена через YC CLI.
+    
+    Обновляет токен каждый час (токен живёт 12 часов, но обновляем чаще для надёжности).
+    """
+    
+    def __init__(self, refresh_interval: int = 3600):
+        """
+        Args:
+            refresh_interval: Интервал обновления токена в секундах (по умолчанию 1 час)
+        """
+        self.refresh_interval = refresh_interval
+        self._token: Optional[str] = None
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._refresh_thread: Optional[threading.Thread] = None
+        self._last_refresh: float = 0
+        
+        # Пробуем получить токен сразу при инициализации
+        self._refresh_token()
+        
+        # Запускаем фоновый поток для обновления
+        self._start_refresh_thread()
+    
+    def _start_refresh_thread(self):
+        """Запустить фоновый поток для периодического обновления токена."""
+        if self._refresh_thread is None or not self._refresh_thread.is_alive():
+            self._stop_event.clear()
+            self._refresh_thread = threading.Thread(target=self._refresh_loop, daemon=True)
+            self._refresh_thread.start()
+            logger.info("🔄 Запущен фоновый поток обновления IAM токена через YC CLI")
+    
+    def _refresh_loop(self):
+        """Цикл периодического обновления токена."""
+        while not self._stop_event.is_set():
+            time.sleep(10)  # Проверяем каждые 10 секунд
+            
+            if self._stop_event.is_set():
+                break
+                
+            # Проверяем, пора ли обновлять токен
+            if time.time() - self._last_refresh >= self.refresh_interval:
+                self._refresh_token()
+    
+    def _refresh_token(self) -> bool:
+        """
+        Получить новый IAM токен через YC CLI.
+        
+        Returns:
+            True если токен успешно получен, иначе False
+        """
+        try:
+            logger.debug("Запрос нового IAM токена через YC CLI...")
+            
+            result = subprocess.run(
+                ["yc", "iam", "create-token"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True
+            )
+            
+            token = result.stdout.strip()
+            if not token:
+                logger.error("YC CLI вернул пустой токен")
+                return False
+            
+            with self._lock:
+                self._token = token
+                self._last_refresh = time.time()
+            
+            logger.info("✅ IAM токен успешно обновлён через YC CLI")
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Ошибка YC CLI при получении токена: {e.stderr}")
+            return False
+        except subprocess.TimeoutExpired:
+            logger.error("Таймаут при выполнении YC CLI")
+            return False
+        except FileNotFoundError:
+            logger.error("YC CLI не найден. Убедитесь, что 'yc' установлен и доступен в PATH")
+            return False
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при получении токена через CLI: {e}")
+            return False
+    
+    def get_token(self) -> Optional[str]:
+        """
+        Получить текущий актуальный IAM токен.
+        
+        Returns:
+            IAM токен или None если не удалось получить
+        """
+        with self._lock:
+            # Если токена нет или прошло больше часа с последнего обновления,
+            # пробуем обновить синхронно
+            if self._token is None or (time.time() - self._last_refresh >= self.refresh_interval):
+                pass  # Выйдем из lock и обновим снаружи
+            else:
+                return self._token
+        
+        # Пробуем обновить синхронно если токен устарел или отсутствует
+        self._refresh_token()
+        
+        with self._lock:
+            return self._token
+    
+    def stop(self):
+        """Остановить фоновый поток обновления токена."""
+        self._stop_event.set()
+        if self._refresh_thread and self._refresh_thread.is_alive():
+            self._refresh_thread.join(timeout=5)
+            logger.info("🛑 Фоновый поток обновления IAM токена остановлен")
+
+
 class YandexVisionClient:
     """Клиент для работы с Yandex Vision OCR API."""
     
@@ -57,10 +177,34 @@ class YandexVisionClient:
     # Альтернативный хост (если основной не работает)
     ALT_URL = "https://ocr.{{ api-host }}/ocr/v1/recognizeText"
     
-    def __init__(self):
+    def __init__(self, use_cli_auth: bool = True, cli_refresh_interval: int = 3600):
+        """
+        Args:
+            use_cli_auth: Использовать YC CLI для получения IAM токена, если не указан API Key
+            cli_refresh_interval: Интервал обновления токена через CLI в секундах (по умолчанию 1 час)
+        """
         self.folder_id = os.getenv("YANDEX_VISION_FOLDER_ID")
         self.iam_token = os.getenv("YANDEX_VISION_IAM_TOKEN")
         self.api_key = os.getenv("YANDEX_VISION_API_KEY")
+        
+        # Менеджер токенов через CLI (используется если нет API Key и статического IAM токена)
+        self._token_manager: Optional[YandexCLITokenManager] = None
+        
+        # Приоритет авторизации:
+        # 1. API Key (самый простой, не требует обновления)
+        # 2. Статический IAM токен (из env)
+        # 3. YC CLI (динамическое обновление)
+        if not self.api_key and not self.iam_token and use_cli_auth:
+            logger.info("API Key и IAM токен не настроены, пробуем использовать YC CLI...")
+            try:
+                self._token_manager = YandexCLITokenManager(refresh_interval=cli_refresh_interval)
+                # Проверяем, удалось ли получить токен
+                if self._token_manager.get_token() is None:
+                    logger.warning("Не удалось получить IAM токен через YC CLI")
+                    self._token_manager = None
+            except Exception as e:
+                logger.error(f"Ошибка инициализации YC CLI менеджера: {e}")
+                self._token_manager = None
         
         self.enabled = self._check_configuration()
     
@@ -70,11 +214,26 @@ class YandexVisionClient:
             logger.warning("YANDEX_VISION_FOLDER_ID не настроен. Yandex Vision OCR недоступен.")
             return False
         
-        if not self.iam_token and not self.api_key:
-            logger.warning("YANDEX_VISION_IAM_TOKEN или YANDEX_VISION_API_KEY не настроены. Yandex Vision OCR недоступен.")
+        # Проверяем наличие любого метода авторизации
+        has_static_auth = bool(self.iam_token or self.api_key)
+        has_cli_auth = self._token_manager is not None and self._token_manager.get_token() is not None
+        
+        if not has_static_auth and not has_cli_auth:
+            logger.warning(
+                "Авторизация не настроена. Установите YANDEX_VISION_API_KEY, "
+                "YANDEX_VISION_IAM_TOKEN или убедитесь, что YC CLI настроен и работает."
+            )
             return False
         
-        logger.info("✅ Yandex Vision OCR API настроен")
+        auth_method = []
+        if self.api_key:
+            auth_method.append("API Key")
+        if self.iam_token:
+            auth_method.append("Static IAM Token")
+        if has_cli_auth:
+            auth_method.append("YC CLI (auto-refresh)")
+        
+        logger.info(f"✅ Yandex Vision OCR API настроен (авторизация: {', '.join(auth_method)})")
         return True
     
     def _get_headers(self) -> Dict[str, str]:
@@ -84,10 +243,15 @@ class YandexVisionClient:
             "x-folder-id": self.folder_id,  # Обязательный заголовок для OCR API
         }
         
-        if self.iam_token:
-            headers["Authorization"] = f"Bearer {self.iam_token}"
-        elif self.api_key:
+        # Приоритет: API Key > Static IAM Token > YC CLI
+        if self.api_key:
             headers["Authorization"] = f"Api-Key {self.api_key}"
+        elif self.iam_token:
+            headers["Authorization"] = f"Bearer {self.iam_token}"
+        elif self._token_manager:
+            token = self._token_manager.get_token()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
         
         return headers
     
@@ -274,12 +438,38 @@ class YandexVisionClient:
     
     def get_status(self) -> Dict[str, Any]:
         """Получить статус конфигурации."""
+        has_cli = self._token_manager is not None
+        cli_token_valid = has_cli and self._token_manager.get_token() is not None
+        
+        auth_methods = []
+        if self.api_key:
+            auth_methods.append("api_key")
+        if self.iam_token:
+            auth_methods.append("static_iam_token")
+        if has_cli:
+            auth_methods.append("yc_cli_auto_refresh")
+        
         return {
             "enabled": self.enabled,
             "folder_id_configured": bool(self.folder_id),
-            "auth_configured": bool(self.iam_token or self.api_key),
-            "auth_method": "iam_token" if self.iam_token else ("api_key" if self.api_key else None)
+            "auth_configured": bool(self.iam_token or self.api_key or cli_token_valid),
+            "auth_methods": auth_methods,
+            "primary_auth_method": (
+                "api_key" if self.api_key 
+                else ("static_iam_token" if self.iam_token 
+                else ("yc_cli" if cli_token_valid else None))
+            ),
+            "cli_token_valid": cli_token_valid,
+            "cli_last_refresh": (
+                self._token_manager._last_refresh if has_cli else None
+            )
         }
+    
+    def stop(self):
+        """Остановить фоновые процессы (например, поток обновления токена)."""
+        if self._token_manager:
+            self._token_manager.stop()
+            self._token_manager = None
 
 
 # Глобальный экземпляр клиента

@@ -9,5 +9,5 @@ __pycache__/
 notes/
 *.log
 *.db
-
+*.swp
 
